@@ -25,3 +25,8 @@ local_data/
 screenshots/*.png
 screenshots/*.jpg
 !screenshots/README.md
+!screenshots/01_overview.png
+!screenshots/02_issues_list.png
+!screenshots/03_detail.png
+!screenshots/04_trend.png
+!screenshots/05_digest.png

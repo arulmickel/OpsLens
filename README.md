@@ -2,6 +2,19 @@
 
 An AI assisted operations monitoring assistant for teams whose Salesforce Marketing Cloud and Salesforce Health Cloud data is exported to Snowflake every day. Each morning OpsLens reads the latest data, detects failures and anomalies, explains them in plain English with a suggested root cause, and delivers the results two ways: a daily email digest pushed to the ops team, and a Streamlit dashboard they can drill into any time.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><b>Overview</b><br><img src="screenshots/01_overview.png" alt="Overview" width="100%"></td>
+    <td align="center"><b>Issues list</b><br><img src="screenshots/02_issues_list.png" alt="Issues list" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Detail view with AI summary and root cause</b><br><img src="screenshots/03_detail.png" alt="Detail view" width="100%"></td>
+    <td align="center"><b>Trends with anomaly day marked</b><br><img src="screenshots/04_trend.png" alt="Trends" width="100%"></td>
+  </tr>
+</table>
+
 ## Why this exists
 
 A typical morning for an operations team is: log in to a console, scroll job lists, eyeball a few dashboards, ask a teammate whether yesterday looked normal. That is slow, easy to miss, and does not scale. OpsLens flips it: the system tells you what changed, in plain English, and points at a likely cause. The human moves straight to triage.

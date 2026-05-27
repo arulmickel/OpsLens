@@ -110,17 +110,13 @@ The two stored procedures wrap the Python entrypoints (Snowpark for Python, or a
 
 A box that already has Python installed runs `scripts/run_analysis.py` and `scripts/send_digest.py` at 08:30. One line in crontab.
 
-### Windows Task Scheduler
-
-Shipped for the demo only. See the PowerShell snippet in `README.md`. Useful when a single ops engineer demos the project on their own laptop; not what a real deployment looks like.
-
 ### Cloud orchestrators
 
 Airflow, Prefect, Dagster, GitHub Actions, or a cloud scheduler all work. Add a single DAG or workflow that calls the same two scripts. Pick this when there is already an orchestrator the team trusts.
 
 ## What is intentionally out of scope
 
-- A live scheduler committed to the repo: production would use a Snowflake Task or a cron runner. We document the choice rather than ship one. The Windows Task Scheduler entry is a demo aid, not the production answer.
+- A live scheduler committed to the repo: production would use a Snowflake Task or a cron runner. The right choice depends on the team's existing stack, so the repo documents the options rather than ships one.
 - SSO: out of scope for a POC. Lightweight bcrypt auth is sufficient and clearly labeled as such.
 - Multi-tenant separation: out of scope.
 - Streaming: every input is a daily export. Real-time would be a different architecture.

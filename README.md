@@ -1,6 +1,6 @@
 # OpsLens
 
-An AI assisted operations monitoring assistant for teams whose Salesforce Marketing Cloud and Salesforce Health Cloud data is exported to Snowflake every day. Each morning OpsLens reads the latest data, detects failures and anomalies, explains them in plain English with a suggested root cause, and delivers the results two ways: a daily email digest pushed to the ops team, and a Streamlit dashboard they can drill into any time.
+An AI assisted operations monitoring assistant for companies whose Salesforce Marketing Cloud and Salesforce Health Cloud data is exported to Snowflake every day. OpsLens reads the latest data each morning, detects failures and anomalies across both source systems, explains every issue in plain English with a suggested root cause, and delivers the results to the operations team through two channels: a daily email digest pushed at 8:30 AM and a Streamlit dashboard the team can drill into any time.
 
 ## Screenshots
 
@@ -15,9 +15,9 @@ An AI assisted operations monitoring assistant for teams whose Salesforce Market
   </tr>
 </table>
 
-## Why this exists
+## The problem
 
-A typical morning for an operations team is: log in to a console, scroll job lists, eyeball a few dashboards, ask a teammate whether yesterday looked normal. That is slow, easy to miss, and does not scale. OpsLens flips it: the system tells you what changed, in plain English, and points at a likely cause. The human moves straight to triage.
+The morning routine for an operations team looks like this: sign in to Snowflake, scroll through job lists across two source systems, eyeball a couple of dashboards, ask each other whether yesterday looked normal. It is slow, it does not scale, and the failure modes that matter most (a missing reconciliation, a quiet bounce-rate creep) are exactly the ones a human is most likely to miss. OpsLens flips that workflow. The system tells the team what changed, in one sentence, and points at a likely cause. The human moves straight to triage.
 
 ## Architecture
 
@@ -25,134 +25,92 @@ A typical morning for an operations team is: log in to a console, scroll job lis
 Mock data generator
         |
         v
-Snowflake RAW tables  (Marketing Cloud + Health Cloud daily exports)
+Snowflake RAW tables   (Marketing Cloud + Health Cloud daily exports)
         |
         v
-Analysis engine  (detectors + reconciliation checks)
+Analysis engine        (detectors + reconciliation checks)
         |
         v
-LLM enrichment  (plain English summary + suggested root cause)
+LLM enrichment         (plain English summary + suggested root cause)
         |
         v
-Snowflake OPS_INSIGHTS table  (single source of truth)
+Snowflake OPS_INSIGHTS (single source of truth for findings)
         |
-        +--------------------+
-        |                    |
-        v                    v
-  Email digest         Streamlit dashboard
-  (daily push)         (drill-in UI)
+        +-------------------+
+        |                   |
+        v                   v
+  Email digest        Streamlit dashboard
+  (daily push)        (drill-in UI)
 ```
 
-Both delivery channels are thin readers over `OPS_INSIGHTS`, so they cannot disagree. The engine is independent of how results are delivered, which keeps the LLM cost in one place and makes new channels (Slack, Teams) a simple add later.
+The engine is decoupled from delivery on purpose. The dashboard and the email digest are thin readers over `OPS_INSIGHTS`, so they can never disagree, and the LLM cost is paid once per run instead of once per page view. Both channels can be extended (Slack, Teams, a webhook) without touching the engine.
 
-## Feature to implementation map
+Full design notes, alternatives considered, and production scheduling options are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-| Required feature | Where it lives |
+## What the engine detects
+
+| Category | What it catches |
 | --- | --- |
-| Detect anomalies and issues | [src/engine/detectors.py](src/engine/detectors.py), [src/engine/reconciliation.py](src/engine/reconciliation.py) |
-| Plain English summaries | [src/llm/](src/llm/) (`base.py`, `openai_provider.py`, `anthropic_provider.py`, `huggingface_provider.py`, `fallback.py`) |
-| Suggested root causes | same module, `suggest_root_cause` on every provider |
+| Rolling-baseline anomaly | Daily totals that breach a z-score threshold against a 14 day baseline, per system and per group |
+| Failed job | Any job that ran today and finished with status `FAILED` |
+| Missing job | A job that ran on prior days but did not run today |
+| Threshold breach | A rate (bounce rate, sync failure rate) above a configurable percent |
+| Reconciliation mismatch | Exported count diverges from loaded count beyond a noise floor |
+
+Every detector returns a structured finding; the LLM layer is what turns it into one sentence of plain English plus a labelled root-cause suggestion.
+
+## How AI is used in operations here
+
+Two places, both deliberate.
+
+1. **Plain English summary.** A non-technical operations manager reads the digest at 8:30 AM. They get one sentence per issue, not a stack trace. That is the deliverable.
+2. **Suggested root cause.** Every insight ships with a labelled "Likely cause" line that combines the finding's pattern with the recent history. The wording is intentionally cautious; the model is told to suggest, not assert.
+
+Three providers are supported (OpenAI, Anthropic, Hugging Face) behind a single interface. The chosen provider is configurable. When no API key is configured for the chosen provider, a deterministic template provider takes over so the system never hard fails. That is the difference between a demo that works in any environment and one that does not.
+
+## Feature map
+
+| Required capability | Where it lives |
+| --- | --- |
+| Detect anomalies and operational issues | [src/engine/detectors.py](src/engine/detectors.py), [src/engine/reconciliation.py](src/engine/reconciliation.py) |
+| Plain English summaries | [src/llm/](src/llm/) (base, OpenAI, Anthropic, Hugging Face, deterministic fallback) |
+| Suggested root causes | Same module, `suggest_root_cause` on every provider |
 | Operational dashboard | [dashboard/app.py](dashboard/app.py) |
-| Demonstrate AI efficiency | Overview "Manual review time avoided" metric plus the push-email model, see the Efficiency section below |
+| AI driven efficiency | "Manual review time avoided" tile plus the 8:30 AM push that removes the need to go looking |
 
-## Tech stack
+## Production thinking
 
-- Snowflake trial account for raw exports and `OPS_INSIGHTS`
-- Python 3.11 plus
-- Streamlit for the dashboard
-- An LLM API for enrichment (OpenAI default, Anthropic and Hugging Face are swappable; a deterministic template fallback runs with no key)
-- SMTP for the digest
-- Mock datasets generated by the project itself
+A few decisions worth flagging because they matter more in a real deployment than they look on a demo.
 
-## Setup
+- **One persisted insights table, two readers.** The dashboard and the digest both read from `OPS_INSIGHTS`. If the LLM were called from the dashboard, the inbox and the screen could drift; if it were called from the digest, the dashboard could not show fresh insights. Persisting the enriched text is what keeps the two channels honest and the cost predictable.
+- **Detectors return structured findings, not text.** Swapping providers, tuning prompts, or running a re-enrichment pass touches one module. The detection logic stays deterministic and unit testable.
+- **Engine operates on DataFrames.** At small daily volumes this is the simplest thing that works. If volumes grew an order of magnitude the same detectors translate to Snowpark or pushdown SQL without changing their callers.
+- **Scheduling is intentionally out of the repo.** A real deployment lives on a Snowflake Task (recommended; SQL skeleton in [ARCHITECTURE.md](ARCHITECTURE.md)), a cron runner, or whatever orchestrator the team already trusts. The right choice depends on the customer's stack, and shipping one choice would imply a recommendation that may not fit.
+- **A deterministic fallback for the LLM.** Without it, a missing API key would mean a hard demo failure and a hard production failure during a provider outage. The fallback path means the system continues to ship findings even when the AI layer is unreachable.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env             # then fill in real values
-```
+## Security
 
-You will need a Snowflake trial account (free for 30 days). Put the account identifier, username, password, warehouse, database, schema, and role in `.env`.
+A full audit lives in [SECURITY.md](SECURITY.md). The short version:
 
-Generate a bcrypt hash for the dashboard password and paste it into `DASHBOARD_PASSWORD_HASH`:
-
-```bash
-python -c "from passlib.hash import bcrypt; print(bcrypt.hash('your_password'))"
-```
-
-Then bring up the stack:
-
-```bash
-python scripts/setup_snowflake.py     # create database, schema, and tables
-python scripts/load_mock_data.py      # generate and load 30 days of mock data with anomalies
-python scripts/run_analysis.py        # run detectors and persist insights
-streamlit run dashboard/app.py        # open http://localhost:8501
-python scripts/send_digest.py         # optional, sends the digest by SMTP
-```
-
-Run tests and the secret scan:
-
-```bash
-pytest
-python scripts/scan_secrets.py
-pre-commit install                    # enable the secret-scan hook
-```
-
-## Switching LLM providers
-
-Set `LLM_PROVIDER` in `.env` to `openai`, `anthropic`, `huggingface`, or `fallback` and provide the matching API key. If a key is missing for the chosen provider, OpsLens automatically uses the deterministic template provider so the app never hard-fails. The template provider produces rule-based summaries and root cause suggestions that are good enough to demo.
-
-## Security at a glance
-
-The full write-up is in [SECURITY.md](SECURITY.md). Summary:
-
-1. **Rate limiting and lockout.** A reusable sliding-window limiter in `src/security/rate_limiter.py` locks out a username after 5 failed logins in 15 minutes, and also caps "Run analysis now" so a viewer cannot burn LLM cost in a loop.
-2. **Secret scanning.** `scripts/scan_secrets.py` looks for API keys, bearer tokens, inline password assignments, and Snowflake credential literals. Wired to pre-commit.
-3. **No exposed secrets.** All credentials live in environment variables. `.env.example` and `.streamlit/secrets.toml.example` ship placeholders only. `.gitignore` excludes the real files. The dashboard password is stored only as a bcrypt hash.
-4. **Input validation.** Every user input flows through Pydantic models in `src/security/validation.py` with size, length, and allow-list constraints.
-5. **Security audit.** [SECURITY.md](SECURITY.md) documents the threat model, the five controls, and the residual risks for a POC.
+1. **Sliding window rate limiter and lockout.** Five failed logins in 15 minutes lock the user; the "Run analysis now" action is throttled to protect LLM cost.
+2. **Secret scanner wired into pre-commit.** Patterns for OpenAI, Anthropic, Hugging Face, AWS, bearer tokens, inline password assignments, and Snowflake credential literals. Exits non-zero on a hit.
+3. **Environment-only secrets.** Every credential is read once in `src/config.py`. The dashboard password is stored only as a bcrypt hash.
+4. **Pydantic input validation everywhere.** Allow-lists on dropdown fields, size caps on free text, hard bounds on date ranges, parameterized queries on every database call.
+5. **Honest residual-risk section.** What is sufficient for a POC, what would change for production (SSO, network policy, row and column access control on PHI, audit trail).
 
 ## Efficiency narrative
 
-Without OpsLens the operations team would scroll job lists and dashboards each morning and ask each other whether yesterday looked normal. Conservative estimate: 12 minutes per issue, per analyst, just to find and triage it. OpsLens detects every issue automatically, summarizes it in one sentence, and emails the team before they sit down. The dashboard shows a "Manual review time avoided" metric calculated as `issues_today * minutes_per_manual_issue` (configurable via env). That number is intentionally simple; the harder benefit is consistency: the system never forgets to check the reconciliation tab.
+The line on the overview tile is the simplest model of the value: `issues_detected * minutes_per_manual_issue`. The harder benefit is consistency. The system never forgets to check the reconciliation tab on a Friday afternoon, never misses a missing job because it was a long week, never under-weighs a quiet bounce-rate creep that does not look like a fire. That consistency is the thing AI buys an operations team that hiring more humans cannot.
 
-## Scheduling
+## Tech stack
 
-The digest script is a one-shot run for the demo. In production it would run on a Snowflake Task, a CloudWatch Events rule, or any cron. That choice is intentionally left out of the repo so the surface is small.
-
-### Daily run on a local Windows machine
-
-For the demo we also wired up a real 8:30 AM run so the story is honest. A small batch script in `scripts/daily_run.bat` chains the analysis and the digest and appends to `logs/daily.log`. Register it once with Windows Task Scheduler (run PowerShell as Administrator):
-
-```powershell
-$action  = New-ScheduledTaskAction -Execute "d:\.projects\AI-powered assistant\opslens\scripts\daily_run.bat"
-$trigger = New-ScheduledTaskTrigger -Daily -At 8:30AM
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "OpsLens Daily Digest" -Action $action -Trigger $trigger -Settings $settings -Description "Runs OpsLens analysis and emails the daily digest"
-```
-
-Test it fires without waiting for tomorrow:
-
-```powershell
-Start-ScheduledTask -TaskName "OpsLens Daily Digest"
-```
-
-Remove it later with:
-
-```powershell
-Unregister-ScheduledTask -TaskName "OpsLens Daily Digest" -Confirm:$false
-```
-
-For a real deployment the equivalent is a Snowflake Task or any cron; see `ARCHITECTURE.md` for the SQL skeleton.
+Snowflake (raw exports and the insights table), Python 3.11+, Streamlit (dashboard), an LLM provider behind a swappable interface (OpenAI default, Anthropic and Hugging Face supported, deterministic template fallback when no key is present), SMTP for the digest, mock datasets generated by the project itself.
 
 ## Repository layout
 
 ```
 opslens/
-  README.md, ARCHITECTURE.md, SECURITY.md, DEMO_SCRIPT.md
-  requirements.txt
-  .env.example, .streamlit/secrets.toml.example
+  README.md, ARCHITECTURE.md, SECURITY.md, DEMO_SCRIPT.md, BUILD_LOG.md
   src/
     config.py, snowflake_client.py
     mock_data/    schemas.py, generate.py
@@ -167,10 +125,10 @@ opslens/
   screenshots/
 ```
 
-## Demo script
+## Demo
 
-A 10-minute walkthrough script is in [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
+A 10 minute walkthrough script for the live demo is in [DEMO_SCRIPT.md](DEMO_SCRIPT.md). The decisions made during the build, the order, and the non-obvious engineering choices are in [BUILD_LOG.md](BUILD_LOG.md).
 
-## Build log
+## Testing
 
-A running log of what was built, the decisions made, and how to pick the project back up later is in [BUILD_LOG.md](BUILD_LOG.md).
+`pytest` covers the detection logic against fixed series, the rate limiter (lockout after five failures, recovery after the window, per-key isolation), and the input-validation models (oversized, malformed, and out-of-range inputs are rejected). External boundaries (Snowflake, LLM, SMTP) are mocked so tests run anywhere without credentials.

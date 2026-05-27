@@ -1,12 +1,12 @@
 # OpsLens build log
 
-A running log of what was built, in what order, and the decisions made along the way. This is the reference doc to skim before the demo or when picking the project back up later.
+The engineering decisions made during the build, the order they happened in, and the non-obvious choices worth flagging for anyone who picks the project up later. This is a maintenance artifact, not a setup guide; runnable steps live in the entry scripts under `scripts/`.
 
-## Day 1: initial build (2026-05-26)
+## Initial build
 
 ### What was built
 
-Full project to spec. Order followed the build plan in `OPSLENS_BUILD_SPEC.md`:
+The full project was built end to end in the order below:
 
 1. **Skeleton + config.** `requirements.txt`, `.gitignore`, `.env.example`, `.streamlit/secrets.toml.example`, and the Pydantic settings model in `src/config.py`.
 2. **Snowflake client.** Thin wrapper in `src/snowflake_client.py` with parameterized queries only and a context-managed connection lifecycle.
@@ -26,57 +26,34 @@ Full project to spec. Order followed the build plan in `OPSLENS_BUILD_SPEC.md`:
 - **One insights table, two readers.** Email and dashboard both read `OPS_INSIGHTS`. Keeps them from drifting and means the LLM cost is paid once per run, not per page load.
 - **Engine returns structured findings, not text.** Re-enrichment is just an LLM swap; no re-detection needed.
 - **Deterministic fallback for LLM.** Demo never breaks when a key is missing. Template wording is good enough to look like a finished product.
-- **Bcrypt direct, not passlib.** Initially used `passlib[bcrypt]` per spec; it broke on bcrypt 5.x on Python 3.14. Switched `src/security/auth.py` to call `bcrypt.hashpw` / `bcrypt.checkpw` directly. Same security primitive, fewer wrapper layers.
-- **Lazy Snowflake import.** `src/engine/pipeline.py` and `src/insights/store.py` use `TYPE_CHECKING` for `SnowflakeClient` so the engine and digest are importable for tests and smoke runs without `snowflake-connector-python` installed.
-- **Scheduler intentionally out of the repo.** Spec calls this out: production picks Snowflake Task vs cron vs orchestrator based on their stack. We document the choice rather than ship one. Added the local Windows scheduler script for the demo only (see below).
+- **Bcrypt directly, not through passlib.** Started on `passlib[bcrypt]`; the wrapper broke against bcrypt 5.x on Python 3.14. Switched `src/security/auth.py` to call `bcrypt.hashpw` and `bcrypt.checkpw` directly. Same primitive, fewer wrapper layers, no behavioural difference for the dashboard.
+- **Lazy Snowflake import.** `src/engine/pipeline.py` and `src/insights/store.py` use `TYPE_CHECKING` for `SnowflakeClient` so the engine and the digest renderer are importable for tests and smoke runs without the Snowflake connector installed. Tests run in a few hundred milliseconds without credentials.
+- **Scheduler intentionally out of the repo.** Production picks Snowflake Task, cron, or whatever orchestrator the team already trusts. Shipping one choice would imply a recommendation that may not fit the customer's stack.
 
-### Setup against the real Snowflake trial
+### Verification
 
-Account, user, role, and dashboard password all live in the local `.env`, which is gitignored. The trial account identifier and dashboard password are intentionally not written in this log so the file stays safe to share.
-
-Run results:
+The full pipeline was exercised end to end against a Snowflake trial account:
 
 ```
-python scripts/setup_snowflake.py       # 6 tables created in OPSLENS.PUBLIC
-python scripts/load_mock_data.py        # 479 rows loaded across 5 tables
-python scripts/run_analysis.py          # 4 insights persisted (3 CRITICAL, 1 HIGH)
-streamlit run dashboard/app.py          # live on http://localhost:8501
-python -m pytest tests/ -q              # 20 passed
-python scripts/scan_secrets.py          # clean, 51 files scanned
+setup_snowflake.py       6 tables created in OPSLENS.PUBLIC
+load_mock_data.py        479 rows loaded across 5 raw tables
+run_analysis.py          4 insights persisted (3 CRITICAL, 1 HIGH)
+pytest                   20 / 20 passed
+scan_secrets.py          clean
 ```
 
-The 4 insights match the 4 injected anomalies. Confirmed end-to-end against Snowflake.
+The four insights match the four anomalies the generator injects deterministically, confirming the engine wires to Snowflake correctly.
 
-### Screenshots captured
+### Known operational notes
 
-Saved under `screenshots/`:
+- LLM provider defaults to the deterministic fallback so the system runs end to end without an API key. Switching to OpenAI, Anthropic, or Hugging Face is a single environment variable plus a key.
+- SMTP is optional. When unconfigured, the digest renders to stdout, which is useful in CI and for visual review without sending mail.
+- Streamlit auth is intentionally lightweight (bcrypt plus sliding window lockout). SSO is the production move and is called out in `SECURITY.md`.
 
-- `01_overview.png`
-- `02_issues_list.png`
-- `03_detail.png`
-- `04_trend.png`
-- `05_digest.png`
+## Future work
 
-### Daily scheduler for the demo (added later in the same session)
-
-Spec says document the scheduler rather than build one. For the demo we still wanted an actual 8:30 AM run on the local machine so the story is convincing:
-
-- `scripts/daily_run.bat`: runs `run_analysis.py` then `send_digest.py`, appends output to `logs/daily.log`.
-- Registered as a Windows Scheduled Task named `OpsLens Daily Digest` via the PowerShell snippet in `README.md`.
-
-In production this would be a Snowflake Task. The bat file and the Task Scheduler entry are explicitly the local-only path for the demo and the README is honest about that.
-
-### Known limitations to call out in the demo
-
-- LLM is set to `fallback` in `.env`. Switch `LLM_PROVIDER` and add a key for live text.
-- SMTP is blank by default. The digest script prints the HTML to stdout when SMTP is unset, which makes for an easy screenshot.
-- Streamlit auth is intentionally lightweight (bcrypt + lockout). SSO is the production move, called out in `SECURITY.md`.
-
-## How to pick this back up later
-
-1. `python -m venv .venv` then `.venv\Scripts\activate`, `pip install -r requirements.txt`.
-2. Fill `.env` from `.env.example`. The Snowflake trial expires 30 days after signup; renew or recreate.
-3. `python scripts/setup_snowflake.py` and `python scripts/load_mock_data.py` rebuild the tables.
-4. `python scripts/run_analysis.py` populates today's insights.
-5. `streamlit run dashboard/app.py` opens the UI; log in with the credentials in `.env`.
-6. If you want the daily schedule back, run the PowerShell snippet in `README.md` once as Administrator.
+- Snowflake Task wired to the analysis and digest stored procedures, as sketched in `ARCHITECTURE.md`, for a real 8:30 AM daily run.
+- SSO via the company IdP, replacing the local bcrypt path.
+- Row and column access policies on Health Cloud tables once real PHI is in play.
+- Slack and Teams delivery channels behind the same `OPS_INSIGHTS` reader pattern the email digest uses today.
+- An audit table that records who ran the pipeline, who signed in, and when.

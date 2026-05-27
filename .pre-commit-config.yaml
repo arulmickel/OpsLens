@@ -1,0 +1,21 @@
+repos:
+  - repo: local
+    hooks:
+      - id: opslens-secret-scan
+        name: OpsLens secret scan
+        entry: python scripts/scan_secrets.py
+        language: system
+        pass_filenames: false
+        stages: [commit]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            .*\.example$|
+            \.secrets\.baseline$|
+            screenshots/.*
+          )$

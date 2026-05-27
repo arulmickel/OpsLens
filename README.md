@@ -1,6 +1,7 @@
 # OpsLens
 
 An AI assisted operations monitoring assistant for companies whose Salesforce Marketing Cloud and Salesforce Health Cloud data is exported to Snowflake every day. OpsLens reads the latest data each morning, detects failures and anomalies across both source systems, explains every issue in plain English with a suggested root cause, and delivers the results to the operations team through two channels: a daily email digest pushed at 8:30 AM and a Streamlit dashboard the team can drill into any time.
+My 10min Demo Script: "DEMO_SCRIPT.md"
 
 ## Screenshots
 
